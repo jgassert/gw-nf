@@ -11,7 +11,7 @@ import json
 from typing import Tuple, Literal, Optional, Dict, Any
 
 from flowjax.flows import masked_autoregressive_flow, triangular_spline_flow
-from flowjax.distributions import Normal, Transformed
+from flowjax.distributions import Normal, Transformed, StudentT
 
 import optax
 import equinox as eqx
@@ -1142,30 +1142,34 @@ def create_flow_from_config(config: dict):
 
     if config["base_dist"] == "Normal":
         base_dist = Normal(jnp.zeros(config["data_dim"]), jnp.ones(config["data_dim"]))
-        key = jax.random.key(config["key"])
-        if config["type"] == "MAF":
-            flow = masked_autoregressive_flow(
-                key=key,
-                base_dist=base_dist,
-                flow_layers=config["flow_layers"],
-                nn_width=config["nn_width"],
-                nn_depth=config["nn_depth"],
-                cond_dim = config.get("cond_dim")
-            )
-        elif config["type"] == "spline":
-            flow = triangular_spline_flow(
-                key=key,
-                base_dist=base_dist,
-                flow_layers=config["flow_layers"],
-                knots=config["knots"],
-                cond_dim = config.get("cond_dim")
-            )
+    elif config["base_dist"] == "StudentT":
+        dof = config.get("dof", 5) # standard value of 5 degrees of freedom
+        base_dist = StudentT(df = jnp.full((config["data_dim"]), dof))
     else:
         warnings.warn("Unknown base distribution in config; only 'Normal' available.")
 
+    key = jax.random.key(config["key"])
+    cond_dim = config.get("cond_dim")
+    if config["type"] == "MAF":
+        flow = masked_autoregressive_flow(
+            key=key,
+            base_dist=base_dist,
+            flow_layers=config["flow_layers"],
+            nn_width=config["nn_width"],
+            nn_depth=config["nn_depth"],
+            cond_dim = config.get("cond_dim")
+        )
+    elif config["type"] == "spline":
+        flow = triangular_spline_flow(
+            key=key,
+            base_dist=base_dist,
+            flow_layers=config["flow_layers"],
+            knots=config["knots"],
+        )
+
     return flow
 
-def train_flow(flow: Transformed, train_dataset: Dataset, val_dataset: Dataset, train_weights: jnp.array |None = None, val_weights: jnp.array |None = None, epochs: int =1000, patience: int =100, batch_size: int =2048, learning_rate: float = 1e-3) -> Tuple[Transformed, dict]:
+def train_flow(flow: Transformed, train_dataset: Dataset, val_dataset: Dataset, train_weights: jnp.array |None = None, val_weights: jnp.array |None = None, epochs: int =1000, patience: int =100, batch_size: int =2048, learning_rate: float = 1e-3, noise: bool = False) -> Tuple[Transformed, dict]:
     """Train method for flow.
 
     Args:
@@ -1254,6 +1258,11 @@ def train_flow(flow: Transformed, train_dataset: Dataset, val_dataset: Dataset, 
                 train_weights[perm][i : i + batch_size]
                 if use_weights else None
             )
+
+            # add some noise for regularization
+            if noise:
+                key = jax.random.key(i*(epoch+1))
+                bx = bx + jax.random.normal(key, shape = bx.shape) * 1e-1 # add small amount of noise
         
             flow, opt_state, loss = train_step(flow, opt_state, bx, by, bw)
             batch_losses.append(float(loss))
